@@ -1,0 +1,13 @@
+services:
+  echoframe-bot:
+    build: .
+    container_name: echoframe-bot
+    restart: always
+    env_file:
+      - .env
+    environment:
+      - FFMPEG_PATH=ffmpeg
+    volumes:
+      - ./assets:/app/assets
+      - ./outputs:/app/outputs
+    # We mount assets so you can easily add background videos without rebuilding the image
