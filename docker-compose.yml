@@ -10,4 +10,4 @@ services:
     volumes:
       - ./assets:/app/assets
       - ./outputs:/app/outputs
-    # We mount assets so you can easily add background videos without rebuilding the image
+      - ./echoframe.db:/app/echoframe.db

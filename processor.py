@@ -68,9 +68,9 @@ class VideoProcessor:
             logger.error(f"Error extracting audio: {e.stderr.decode()}")
             return False
 
-    def process_video(self, input_video_path, output_filename):
-        """Main processing logic."""
-        audio_path = os.path.join(self.outputs_path, "temp_audio.mp3")
+    def process_video(self, input_video_path, output_filename, crf=28, preset="veryfast"):
+        """Main processing logic with compression support."""
+        audio_path = os.path.join(self.outputs_path, f"temp_audio_{random.randint(1000,9999)}.mp3")
         if not self.extract_audio(input_video_path, audio_path):
             return None
 
@@ -86,28 +86,14 @@ class VideoProcessor:
         
         bg_file = random.choice(backgrounds)
         bg_path = os.path.join(self.backgrounds_path, bg_file)
-        bg_duration = self.get_duration(bg_path)
         
         frame_path = os.path.join(self.frames_path, "frame.png")
         if not os.path.exists(frame_path):
-            logger.error("Frame overlay not found in assets/frames/frame.png")
+            logger.error("Frame overlay not found")
             return None
 
         output_path = os.path.join(self.outputs_path, output_filename)
 
-        # Build FFmpeg command
-        # Logic:
-        # 1. Scale background to fill 1080x1920 (crop if necessary)
-        # 2. Loop background if duration < audio
-        # 3. Overlay frame.png
-        # 4. Add audio from extracted mp3
-        # 5. Trim to audio length (-shortest)
-        
-        # FFmpeg filter complex:
-        # [0:v] scale to 1080x1920 while maintaining aspect ratio, then crop center
-        # [0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920[vbg];
-        # [vbg][1:v]overlay=0:0[vout]
-        
         filter_complex = (
             "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,crop=1080:1920[vbg];"
             "[vbg][1:v]overlay=0:0[vout]"
@@ -115,18 +101,18 @@ class VideoProcessor:
 
         cmd = [
             FFMPEG_PATH,
-            "-stream_loop", "-1", "-i", bg_path,     # Input 0: Background (looped)
-            "-i", frame_path,                         # Input 1: Frame Overlay
-            "-i", audio_path,                         # Input 2: Audio
+            "-stream_loop", "-1", "-i", bg_path,
+            "-i", frame_path,
+            "-i", audio_path,
             "-filter_complex", filter_complex,
-            "-map", "[vout]",                         # Map processed video
-            "-map", "2:a",                            # Map audio from input 2
+            "-map", "[vout]",
+            "-map", "2:a",
             "-c:v", "libx264",
-            "-preset", "veryfast",
-            "-crf", "23",
+            "-preset", preset,
+            "-crf", str(crf),
             "-c:a", "aac",
-            "-shortest",                              # Finish when the shortest stream (audio) ends
-            "-y",                                     # Overwrite output
+            "-shortest",
+            "-y",
             output_path
         ]
 
