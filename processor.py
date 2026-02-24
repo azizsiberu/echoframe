@@ -2,6 +2,7 @@ import subprocess
 import os
 import random
 import logging
+from PIL import Image
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -132,3 +133,52 @@ class VideoProcessor:
         finally:
             if os.path.exists(audio_path):
                 os.remove(audio_path)
+
+    def process_video_frame_only(self, input_video_path, output_filename, crf=28, preset="veryfast"):
+        """
+        Hanya menambahkan frame overlay pada video user. Tidak pakai background video.
+        Output ukuran mengikuti ukuran frame (frame.png).
+        """
+        frame_path = os.path.join(self.frames_path, "frame.png")
+        if not os.path.exists(frame_path):
+            logger.error("Frame overlay not found")
+            return None
+
+        try:
+            with Image.open(frame_path) as im:
+                fw, fh = im.size
+        except Exception as e:
+            logger.error(f"Could not read frame dimensions: {e}")
+            return None
+
+        output_path = os.path.join(self.outputs_path, output_filename)
+        # Scale/crop video ke ukuran frame, lalu overlay frame di atas
+        filter_complex = (
+            f"[0:v]scale={fw}:{fh}:force_original_aspect_ratio=increase,crop={fw}:{fh}[vid];"
+            f"[vid][1:v]overlay=0:0[vout]"
+        )
+        cmd = [
+            FFMPEG_PATH,
+            "-i", input_video_path,
+            "-i", frame_path,
+            "-filter_complex", filter_complex,
+            "-map", "[vout]",
+            "-map", "0:a?",
+            "-c:v", "libx264",
+            "-preset", preset,
+            "-crf", str(crf),
+            "-c:a", "aac",
+            "-movflags", "+faststart",
+            "-y",
+            output_path
+        ]
+        try:
+            logger.info(f"Starting FFmpeg frame-only processing for {output_path} ({fw}x{fh})")
+            subprocess.run(cmd, check=True, capture_output=True)
+            return output_path
+        except FileNotFoundError:
+            logger.error(f"Error: {FFMPEG_PATH} not found. Please install FFmpeg and add it to your PATH.")
+            return None
+        except subprocess.CalledProcessError as e:
+            logger.error(f"FFmpeg Error (frame-only): {e.stderr.decode() if e.stderr else e}")
+            return None

@@ -3,6 +3,7 @@ import logging
 import asyncio
 from telegram import Update, ReplyKeyboardMarkup, KeyboardButton
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.error import BadRequest
 from dotenv import load_dotenv
 from processor import VideoProcessor
 from database import DatabaseManager
@@ -12,6 +13,8 @@ load_dotenv()
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 ASSETS_PATH = os.getenv("ASSETS_PATH", "./assets")
 OUTPUTS_PATH = os.getenv("OUTPUTS_PATH", "./outputs")
+MAX_INPUT_MB = 20   # Batas unduh bot (limit Telegram getFile); video yang dikirim user harus ≤ ini
+MAX_VIDEO_MB = 50   # Batas ukuran hasil saat kirim balik ke user (limit Telegram sendVideo)
 
 # Logging
 logging.basicConfig(
@@ -27,6 +30,7 @@ job_queue = asyncio.Queue()
 
 def get_main_menu():
     keyboard = [
+        [KeyboardButton("🖼 Hanya Frame"), KeyboardButton("📹 Full Echo")],
         [KeyboardButton("📊 Status Kerja"), KeyboardButton("📜 Riwayat")],
         [KeyboardButton("❓ Bantuan")]
     ]
@@ -55,10 +59,11 @@ def check_assets():
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     db.add_user(update.effective_chat.id, update.effective_user.username)
+    context.user_data['frame_only'] = False  # default = Full Echo
     await update.message.reply_text(
         "Halo! Saya *EchoFrame Bot*.\n\n"
-        "Kirimkan video ke saya, dan saya akan mengubahnya menjadi konten vertikal (9:16) "
-        "estetis secara otomatis.",
+        "*Default:* Langsung kirim video = *Full Echo* (vertikal 9:16 + background + frame).\n\n"
+        "Atau pilih *🖼 Hanya Frame* kalau mau cuma tambah frame saja.",
         reply_markup=get_main_menu(),
         parse_mode='Markdown'
     )
@@ -66,13 +71,26 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = (
         "*Panduan Penggunaan EchoFrame Bot*:\n\n"
-        "1. *Cara Pakai*: Cukup kirimkan file video ke chat ini.\n"
-        "2. *Proses*: Bot akan mengekstrak audio, memilih background acak, dan memasang frame branding.\n"
-        "3. *Resolusi*: Hasil video dijamin 1080x1920 (9:16).\n"
-        "4. *Antrean*: Jika banyak user, video akan masuk antrean (FIFO).\n\n"
-        "Gunakan menu di bawah untuk cek status atau histori."
+        "• *Default*: Kalau cuma kirim video (tanpa pilih mode) = *Full Echo* (9:16 + background + frame).\n"
+        "• *🖼 Hanya Frame*: Pilih ini dulu kalau mau output cuma video + frame saja (ukuran = ukuran frame).\n"
+        "• *📹 Full Echo*: Pilih ini untuk konversi vertikal dengan background acak + frame.\n\n"
+        "Kirim file video ke chat. Cek status atau histori lewat menu di bawah."
     )
     await update.message.reply_text(help_text, parse_mode='Markdown')
+
+async def set_frame_only(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['frame_only'] = True
+    await update.message.reply_text(
+        "Mode: *Hanya Frame*. Kirim video ke sini, bot hanya akan menambah frame overlay. Ukuran output mengikuti ukuran frame.",
+        parse_mode='Markdown'
+    )
+
+async def set_full_echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['frame_only'] = False
+    await update.message.reply_text(
+        "Mode: *Full Echo*. Kirim video untuk konversi vertikal 9:16 dengan background acak + frame.",
+        parse_mode='Markdown'
+    )
 
 async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     active_jobs = db.get_active_jobs(update.effective_chat.id)
@@ -105,26 +123,49 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         return
 
-    # Add to DB and Queue
+    # Cek ukuran jika tersedia (Telegram getFile max 20MB)
+    if getattr(video, "file_size", None) and video.file_size > MAX_INPUT_MB * 1024 * 1024:
+        await update.message.reply_text(
+            f"Video terlalu besar untuk diunduh bot. Maksimal *{MAX_INPUT_MB}MB* (batas Telegram).",
+            parse_mode="Markdown"
+        )
+        return
+
     input_filename = f"input_{video.file_id}.mp4"
     input_path = os.path.join(OUTPUTS_PATH, input_filename)
-    
-    # Download first (to avoid file_id expiring if queue is long)
+
     msg = await update.message.reply_text("EchoFrame: Mengunduh video...")
-    file = await context.bot.get_file(video.file_id)
-    await file.download_to_drive(input_path)
-    
+    try:
+        file = await context.bot.get_file(video.file_id)
+        await file.download_to_drive(input_path)
+    except BadRequest as e:
+        if "too big" in str(e).lower() or "file" in str(e).lower():
+            await msg.edit_text(
+                f"Video terlalu besar untuk diunduh bot. Maksimal *{MAX_INPUT_MB}MB* (batas Telegram). "
+                "Kompres video atau kirim yang lebih kecil.",
+                parse_mode="Markdown"
+            )
+        else:
+            await msg.edit_text(f"Gagal mengunduh: {e.message}")
+        return
+
     job_id = db.create_job(update.effective_chat.id, input_path)
     pos = db.get_queue_position(job_id)
-    
-    await msg.edit_text(f"EchoFrame: Berhasil masuk antrean! \nJob ID: *#{job_id}* \nUrutan ke: *{pos}*", parse_mode='Markdown')
-    
+    frame_only = context.user_data.get('frame_only', False)
+
+    mode_label = "Hanya Frame" if frame_only else "Full Echo"
+    await msg.edit_text(
+        f"EchoFrame: Berhasil masuk antrean! \nJob ID: *#{job_id}* \nMode: *{mode_label}* \nUrutan ke: *{pos}*",
+        parse_mode='Markdown'
+    )
+
     # Put in queue for worker
     await job_queue.put({
         'job_id': job_id,
         'chat_id': update.effective_chat.id,
         'msg_id': msg.message_id,
-        'input_path': input_path
+        'input_path': input_path,
+        'frame_only': frame_only,
     })
 
 async def worker():
@@ -136,23 +177,26 @@ async def worker():
         chat_id = job_data['chat_id']
         msg_id = job_data['msg_id']
         input_path = job_data['input_path']
+        frame_only = job_data.get('frame_only', False)
 
         try:
             db.update_job_status(job_id, 'PROCESSING')
-            # Use app to send updates
             from telegram import Bot
             bot = Bot(TOKEN)
-            
+
+            status_label = "Menambah frame..." if frame_only else "Merakit Video..."
             await bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=msg_id,
-                text=f"EchoFrame Status Job *#{job_id}*: \n- [DONE] Unduh \n- [/] Merakit Video...",
+                text=f"EchoFrame Status Job *#{job_id}*: \n- [DONE] Unduh \n- [/] {status_label}",
                 parse_mode='Markdown'
             )
 
             output_filename = f"echoframe_{job_id}.mp4"
-            # Initial render with balanced settings (CRF 28)
-            final_path = await asyncio.to_thread(processor.process_video, input_path, output_filename, crf=28)
+            if frame_only:
+                final_path = await asyncio.to_thread(processor.process_video_frame_only, input_path, output_filename, crf=28)
+            else:
+                final_path = await asyncio.to_thread(processor.process_video, input_path, output_filename, crf=28)
 
             if final_path and os.path.exists(final_path):
                 file_size_mb = os.path.getsize(final_path) / (1024 * 1024)
@@ -165,8 +209,10 @@ async def worker():
                         text=f"EchoFrame Job *#{job_id}*: File terlalu besar ({file_size_mb:.1f}MB). Mengompres ulang...",
                         parse_mode='Markdown'
                     )
-                    # Retry with higher CRF (more compression)
-                    final_path = await asyncio.to_thread(processor.process_video, input_path, output_filename, crf=32)
+                    if frame_only:
+                        final_path = await asyncio.to_thread(processor.process_video_frame_only, input_path, output_filename, crf=32)
+                    else:
+                        final_path = await asyncio.to_thread(processor.process_video, input_path, output_filename, crf=32)
                     file_size_mb = os.path.getsize(final_path) / (1024 * 1024)
 
                 if file_size_mb > 50:
@@ -174,12 +220,12 @@ async def worker():
 
                 db.update_job_status(job_id, 'COMPLETED', output_path=final_path)
                 await bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text=f"EchoFrame Job *#{job_id}*: Selesai! Mengirim...")
-                
+                mode_caption = "Hanya Frame" if frame_only else "Full Echo"
                 with open(final_path, 'rb') as vf:
                     await bot.send_video(
                         chat_id=chat_id,
                         video=vf,
-                        caption=f"*EchoFrame Pro Sukses!*\nJob ID: #{job_id}",
+                        caption=f"*EchoFrame – {mode_caption}*\nJob ID: #{job_id}",
                         parse_mode='Markdown',
                         write_timeout=300
                     )
@@ -187,7 +233,7 @@ async def worker():
                 if os.path.exists(final_path):
                     os.remove(final_path)
             else:
-                raise Exception("Rendering failed")
+                raise Exception("Rendering gagal")
 
         except Exception as e:
             logger.error(f"Worker Error on Job {job_id}: {e}")
@@ -219,6 +265,8 @@ if __name__ == '__main__':
     application.add_handler(CommandHandler('history', history_command))
     
     # Button Handlers
+    application.add_handler(MessageHandler(filters.Text("🖼 Hanya Frame"), set_frame_only))
+    application.add_handler(MessageHandler(filters.Text("📹 Full Echo"), set_full_echo))
     application.add_handler(MessageHandler(filters.Text("📊 Status Kerja"), status_command))
     application.add_handler(MessageHandler(filters.Text("📜 Riwayat"), history_command))
     application.add_handler(MessageHandler(filters.Text("❓ Bantuan"), help_command))
