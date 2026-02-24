@@ -1,6 +1,6 @@
 import sqlite3
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 
 class DatabaseManager:
     def __init__(self, db_path=None):
@@ -98,3 +98,33 @@ class DatabaseManager:
                 (job_id,)
             )
             return cursor.fetchone()[0]
+
+    def cleanup_old_jobs(self, days=3):
+        """
+        Hapus jobs yang sudah COMPLETED atau FAILED lebih dari X hari.
+        Returns: (deleted_count, list of (id, output_path, input_path))
+        """
+        cutoff_date = (datetime.now() - timedelta(days=days)).isoformat()
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            # Ambil data sebelum hapus (untuk cleanup file)
+            cursor.execute(
+                '''SELECT id, output_path, input_path FROM jobs 
+                   WHERE status IN ('COMPLETED', 'FAILED') 
+                   AND finished_at IS NOT NULL 
+                   AND finished_at < ?''',
+                (cutoff_date,)
+            )
+            jobs_to_delete = cursor.fetchall()
+            
+            # Hapus dari database
+            cursor.execute(
+                '''DELETE FROM jobs 
+                   WHERE status IN ('COMPLETED', 'FAILED') 
+                   AND finished_at IS NOT NULL 
+                   AND finished_at < ?''',
+                (cutoff_date,)
+            )
+            deleted_count = cursor.rowcount
+            conn.commit()
+            return deleted_count, jobs_to_delete

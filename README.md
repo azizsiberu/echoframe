@@ -6,11 +6,15 @@
 
 ## ✨ Features
 
-- **Automated Vertical Conversion**: Automatically scales and crops content to 1080x1920 (9:16).
-- **Randomized Backgrounds**: Picks a random video background from your collection for every job.
+- **Dual Processing Modes**:
+  - **Full Echo** (default): Converts videos to vertical 9:16 format with random background + frame overlay
+  - **Frame Only**: Adds frame overlay to your video without changing background (output size matches frame)
+- **Automated Vertical Conversion**: Automatically scales and crops content to 1080x1920 (9:16) in Full Echo mode.
+- **Randomized Backgrounds**: Picks a random video background from your collection for every Full Echo job.
 - **Queue System**: Handles multiple users simultaneously using an asynchronous job queue (FIFO).
 - **History & Status tracking**: Users can check their active jobs and history directly via the bot interface.
 - **Smart Compression**: Automatically attempts to compress videos to fit within Telegram's 50MB limit.
+- **Auto Cleanup**: Automatically cleans up old completed/failed jobs and files (default: 3 days old).
 - **Database Integrated**: Uses SQLite for robust tracking of user data and job statuses.
 
 ---
@@ -56,9 +60,9 @@
    ```
 
 4. **Prepare Assets**:
-   - Place background videos in `assets/backgrounds/` (e.g., `.mp4`, `.mov`).
-   - Place your overlay frame (1080x1920 PNG) at `assets/frames/frame.png`.
-   - You can use `python create_assets.py` if provided to generate placeholders.
+   - **For Full Echo mode**: Place background videos in `assets/backgrounds/` (e.g., `.mp4`, `.mov`).
+   - **For both modes**: Place your overlay frame (PNG) at `assets/frames/frame.png`. Output size will match frame dimensions.
+   - You can use `python create_assets.py` to generate a placeholder frame (1080x1920).
 
 5. **Run the Bot**:
    ```bash
@@ -100,8 +104,23 @@ echoframe/
 | `/help` | Detailed guide on how to use the bot |
 | `/jobs` | View your current queue status |
 | `/history` | View your last 5 completed videos |
+| `/cleanup [days]` | Manually cleanup old jobs and files (default: 3 days) |
 
-Users can also use the custom keyboard buttons: **📊 Status Kerja**, **📜 Riwayat**, and **❓ Bantuan**.
+### Keyboard Menu Buttons
+
+- **🖼 Hanya Frame**: Switch to frame-only mode (no background change)
+- **📹 Full Echo**: Switch to full echo mode (vertical conversion + background)
+- **📊 Status Kerja**: View active jobs in queue
+- **📜 Riwayat**: View last 5 completed videos
+- **🧹 Cleanup**: Cleanup old jobs and files (3 days default)
+- **❓ Bantuan**: Show help guide
+
+### Usage
+
+1. **Default Mode (Full Echo)**: Simply send a video - bot will convert it to vertical 9:16 with random background + frame.
+2. **Frame Only Mode**: Press **🖼 Hanya Frame** button, then send your video - bot will only add frame overlay.
+
+**Note**: Maximum video size for upload is **20MB** (Telegram Bot API limit). Output videos are limited to **50MB**.
 
 ---
 
@@ -113,6 +132,19 @@ Users can also use the custom keyboard buttons: **📊 Status Kerja**, **📜 Ri
 | `ASSETS_PATH` | Path to the assets folder | `./assets` |
 | `OUTPUTS_PATH` | Path where videos are processed | `./outputs` |
 | `FFMPEG_PATH` | Path to the FFmpeg executable | `ffmpeg` |
+| `DATABASE_PATH` | Path to SQLite database file | `echoframe.db` |
+
+## 🧹 Cleanup
+
+The bot automatically cleans up old completed/failed jobs and files when it starts (default: 3 days old). You can also manually trigger cleanup:
+
+- Use `/cleanup` command or press **🧹 Cleanup** button for default cleanup (3 days)
+- Use `/cleanup 7` to cleanup files older than 7 days
+
+Cleanup removes:
+- Database entries for completed/failed jobs older than specified days
+- Associated output video files (`echoframe_*.mp4`)
+- Any remaining input files (`input_*.mp4`)
 
 ---
 

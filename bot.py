@@ -32,7 +32,7 @@ def get_main_menu():
     keyboard = [
         [KeyboardButton("🖼 Hanya Frame"), KeyboardButton("📹 Full Echo")],
         [KeyboardButton("📊 Status Kerja"), KeyboardButton("📜 Riwayat")],
-        [KeyboardButton("❓ Bantuan")]
+        [KeyboardButton("🧹 Cleanup"), KeyboardButton("❓ Bantuan")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
@@ -114,6 +114,53 @@ async def history_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for item in history:
         text += f"- Job #{item[0]}: Selesai pada {item[2]}\n"
     await update.message.reply_text(text, parse_mode='Markdown')
+
+def cleanup_old_outputs(days=3):
+    """
+    Cleanup file output lama dan entry database.
+    Returns: (deleted_jobs_count, deleted_files_count)
+    """
+    deleted_jobs, jobs_data = db.cleanup_old_jobs(days=days)
+    deleted_files = 0
+    
+    for job_id, output_path, input_path in jobs_data:
+        # Hapus output file jika ada
+        if output_path and os.path.exists(output_path):
+            try:
+                os.remove(output_path)
+                deleted_files += 1
+            except Exception as e:
+                logger.warning(f"Gagal hapus output file {output_path}: {e}")
+        
+        # Hapus input file jika masih ada (seharusnya sudah dihapus di worker, tapi jaga-jaga)
+        if input_path and os.path.exists(input_path):
+            try:
+                os.remove(input_path)
+                deleted_files += 1
+            except Exception as e:
+                logger.warning(f"Gagal hapus input file {input_path}: {e}")
+    
+    return deleted_jobs, deleted_files
+
+async def cleanup_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Command untuk cleanup manual."""
+    days = 3
+    if context.args and len(context.args) > 0:
+        try:
+            days = int(context.args[0])
+            if days < 1:
+                days = 3
+        except ValueError:
+            days = 3
+    
+    await update.message.reply_text(f"Cleanup: Menghapus data & file lebih dari {days} hari...")
+    deleted_jobs, deleted_files = await asyncio.to_thread(cleanup_old_outputs, days)
+    await update.message.reply_text(
+        f"✅ Cleanup selesai!\n"
+        f"- Jobs dihapus: {deleted_jobs}\n"
+        f"- File dihapus: {deleted_files}",
+        parse_mode='Markdown'
+    )
 
 async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.message.video:
@@ -263,12 +310,14 @@ if __name__ == '__main__':
     application.add_handler(CommandHandler('help', help_command))
     application.add_handler(CommandHandler('jobs', status_command))
     application.add_handler(CommandHandler('history', history_command))
+    application.add_handler(CommandHandler('cleanup', cleanup_command))
     
     # Button Handlers
     application.add_handler(MessageHandler(filters.Text("🖼 Hanya Frame"), set_frame_only))
     application.add_handler(MessageHandler(filters.Text("📹 Full Echo"), set_full_echo))
     application.add_handler(MessageHandler(filters.Text("📊 Status Kerja"), status_command))
     application.add_handler(MessageHandler(filters.Text("📜 Riwayat"), history_command))
+    application.add_handler(MessageHandler(filters.Text("🧹 Cleanup"), cleanup_command))
     application.add_handler(MessageHandler(filters.Text("❓ Bantuan"), help_command))
     
     # Video Handler
@@ -277,6 +326,14 @@ if __name__ == '__main__':
     # Start worker as a background task
     loop = asyncio.get_event_loop()
     loop.create_task(worker())
+    
+    # Auto-cleanup saat bot start (opsional, bisa di-comment jika tidak mau)
+    logger.info("Running initial cleanup...")
+    try:
+        deleted_jobs, deleted_files = cleanup_old_outputs(days=3)
+        logger.info(f"Initial cleanup: {deleted_jobs} jobs, {deleted_files} files deleted")
+    except Exception as e:
+        logger.warning(f"Initial cleanup error: {e}")
     
     logger.info("EchoFrame Bot with Queue started...")
     application.run_polling()
