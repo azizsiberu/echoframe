@@ -216,28 +216,31 @@ async def handle_video(update: Update, context: ContextTypes.DEFAULT_TYPE):
     })
 
 async def worker():
-    """Background worker to process jobs one by one."""
+    """Background worker to process jobs one by one (Telegram + API)."""
     logger.info("Background Worker started...")
     while True:
         job_data = await job_queue.get()
         job_id = job_data['job_id']
         chat_id = job_data['chat_id']
-        msg_id = job_data['msg_id']
+        msg_id = job_data.get('msg_id')
         input_path = job_data['input_path']
         frame_only = job_data.get('frame_only', False)
+        via_api = job_data.get('via_api', False)
 
         try:
             db.update_job_status(job_id, 'PROCESSING')
             from telegram import Bot
-            bot = Bot(TOKEN)
+            bot = Bot(TOKEN) if TOKEN else None
 
-            status_label = "Menambah frame..." if frame_only else "Merakit Video..."
-            await bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=msg_id,
-                text=f"EchoFrame Status Job *#{job_id}*: \n- [DONE] Unduh \n- [/] {status_label}",
-                parse_mode='Markdown'
-            )
+            # Telegram jobs: update status message. API jobs tanpa msg_id: skip.
+            if bot and msg_id:
+                status_label = "Menambah frame..." if frame_only else "Merakit Video..."
+                await bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=msg_id,
+                    text=f"EchoFrame Status Job *#{job_id}*: \n- [DONE] Unduh \n- [/] {status_label}",
+                    parse_mode='Markdown'
+                )
 
             output_filename = f"echoframe_{job_id}.mp4"
             if frame_only:
@@ -247,15 +250,16 @@ async def worker():
 
             if final_path and os.path.exists(final_path):
                 file_size_mb = os.path.getsize(final_path) / (1024 * 1024)
-                
+
                 # If STILL too big, try high compression
                 if file_size_mb > 50:
-                    await bot.edit_message_text(
-                        chat_id=chat_id,
-                        message_id=msg_id,
-                        text=f"EchoFrame Job *#{job_id}*: File terlalu besar ({file_size_mb:.1f}MB). Mengompres ulang...",
-                        parse_mode='Markdown'
-                    )
+                    if bot and msg_id:
+                        await bot.edit_message_text(
+                            chat_id=chat_id,
+                            message_id=msg_id,
+                            text=f"EchoFrame Job *#{job_id}*: File terlalu besar ({file_size_mb:.1f}MB). Mengompres ulang...",
+                            parse_mode='Markdown'
+                        )
                     if frame_only:
                         final_path = await asyncio.to_thread(processor.process_video_frame_only, input_path, output_filename, crf=32)
                     else:
@@ -266,19 +270,39 @@ async def worker():
                     raise Exception(f"Ukuran video ({file_size_mb:.1f}MB) melebihi batas 50MB Telegram Bot API.")
 
                 db.update_job_status(job_id, 'COMPLETED', output_path=final_path)
-                await bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text=f"EchoFrame Job *#{job_id}*: Selesai! Mengirim...")
-                mode_caption = "Hanya Frame" if frame_only else "Full Echo"
-                with open(final_path, 'rb') as vf:
-                    await bot.send_video(
-                        chat_id=chat_id,
-                        video=vf,
-                        caption=f"*EchoFrame – {mode_caption}*\nJob ID: #{job_id}",
-                        parse_mode='Markdown',
-                        write_timeout=300
-                    )
-                await bot.delete_message(chat_id=chat_id, message_id=msg_id)
-                if os.path.exists(final_path):
-                    os.remove(final_path)
+
+                if via_api:
+                    # Job dari web/API: file TETAP disimpan agar bisa di-download
+                    # via GET /api/jobs/{id}/download. Opsional: notif ke Telegram.
+                    logger.info(f"API Job #{job_id} selesai: {final_path}")
+                    if bot and chat_id:
+                        try:
+                            mode_caption = "Hanya Frame" if frame_only else "Full Echo"
+                            with open(final_path, 'rb') as vf:
+                                await bot.send_video(
+                                    chat_id=chat_id,
+                                    video=vf,
+                                    caption=f"*EchoFrame – {mode_caption}*\nJob ID: #{job_id}",
+                                    parse_mode='Markdown',
+                                    write_timeout=300
+                                )
+                        except Exception as e:
+                            logger.warning(f"Notifikasi Telegram job API #{job_id} gagal: {e}")
+                    # JANGAN hapus final_path di sini (untuk download API)
+                else:
+                    await bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text=f"EchoFrame Job *#{job_id}*: Selesai! Mengirim...")
+                    mode_caption = "Hanya Frame" if frame_only else "Full Echo"
+                    with open(final_path, 'rb') as vf:
+                        await bot.send_video(
+                            chat_id=chat_id,
+                            video=vf,
+                            caption=f"*EchoFrame – {mode_caption}*\nJob ID: #{job_id}",
+                            parse_mode='Markdown',
+                            write_timeout=300
+                        )
+                    await bot.delete_message(chat_id=chat_id, message_id=msg_id)
+                    if os.path.exists(final_path):
+                        os.remove(final_path)
             else:
                 raise Exception("Rendering gagal")
 
@@ -286,24 +310,38 @@ async def worker():
             logger.error(f"Worker Error on Job {job_id}: {e}")
             db.update_job_status(job_id, 'FAILED', error_msg=str(e))
             try:
-                from telegram import Bot
-                bot = Bot(TOKEN)
-                await bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text=f"EchoFrame Error pada Job *#{job_id}*: {str(e)}", parse_mode='Markdown')
+                if msg_id:
+                    from telegram import Bot
+                    bot = Bot(TOKEN)
+                    await bot.edit_message_text(chat_id=chat_id, message_id=msg_id, text=f"EchoFrame Error pada Job *#{job_id}*: {str(e)}", parse_mode='Markdown')
             except: pass
         finally:
             if os.path.exists(input_path):
                 os.remove(input_path)
             job_queue.task_done()
 
+async def post_init(application):
+    """Jalan di loop yang sama dengan polling: start worker + REST API."""
+    import api as echoframe_api
+    import uvicorn
+    api_host = os.getenv("API_HOST", "0.0.0.0")
+    api_port = int(os.getenv("API_PORT", "8000"))
+    echoframe_api.set_queue(job_queue)
+    asyncio.get_running_loop().create_task(worker())
+    config = uvicorn.Config(echoframe_api.app, host=api_host, port=api_port, log_level="info")
+    server = uvicorn.Server(config)
+    asyncio.get_running_loop().create_task(server.serve())
+    logger.info(f"EchoFrame API listening on {api_host}:{api_port}")
+
 if __name__ == '__main__':
     if not TOKEN:
         print("Error: TELEGRAM_BOT_TOKEN not found")
         exit(1)
-        
+
     if not check_assets():
         exit(1)
-        
-    application = ApplicationBuilder().token(TOKEN).build()
+
+    application = ApplicationBuilder().token(TOKEN).post_init(post_init).build()
     
     # Handlers
     application.add_handler(CommandHandler('start', start))
@@ -322,10 +360,8 @@ if __name__ == '__main__':
     
     # Video Handler
     application.add_handler(MessageHandler(filters.VIDEO | filters.Document.Category("video"), handle_video))
-    
-    # Start worker as a background task
-    loop = asyncio.get_event_loop()
-    loop.create_task(worker())
+
+    # Worker + API dijalankan via post_init (satu loop asyncio dengan polling)
     
     # Auto-cleanup saat bot start (opsional, bisa di-comment jika tidak mau)
     logger.info("Running initial cleanup...")

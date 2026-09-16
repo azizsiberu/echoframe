@@ -19,8 +19,8 @@ COPY . .
 # Create necessary directories
 RUN mkdir -p assets/backgrounds assets/frames outputs
 
-# Expose no ports needed for polling bot, but good practice if adding a webhook later
-# EXPOSE 8080
+# Expose API port for web integration
+EXPOSE 8000
 
 # Environment variables (default values)
 ENV ASSETS_PATH=/app/assets

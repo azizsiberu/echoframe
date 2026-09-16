@@ -11,3 +11,5 @@ services:
       - ./assets:/app/assets
       - ./outputs:/app/outputs
       - ./echoframe.db:/app/echoframe.db
+    ports:
+      - "8002:8000"
